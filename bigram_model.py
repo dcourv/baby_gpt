@@ -8,10 +8,9 @@ TRAIN_SPLIT = 0.8
 EMBEDDING_DIM = 128 # @NOTE unused as of yet
 TRAINING_ITERS = 3000
 LEARNING_RATE = 1e-2
+EVAL_ITERS = 200
 
-# @TODO add GPU support
-# device = 'cuda' if torch.cuda.is_available() else 'cpu'
-device = 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
@@ -61,17 +60,30 @@ def get_batch(split: str):
     x = torch.stack([ data[offset:offset+BLOCK_SIZE] for offset in data_offsets ])
     y = torch.stack([ data[offset+1:offset+BLOCK_SIZE+1] for offset in data_offsets ])
 
+    x, y = x.to(device), y.to(device)
+
     return x, y
 
-torch.manual_seed(0)
-x, y = get_batch('train')
-
+@torch.no_grad()
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(EVAL_ITERS)
+        for k in range(EVAL_ITERS):
+            x, y = get_batch(split)
+            logits, loss = model(x, y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    # @NOTE Don't forget to put model back into training mode!
+    model.train()
+    return out
 
 ## Define and instantiate simple bigram model
 
 class BigramLanguageModel(nn.Module):
 
-    def __init__(self, vocab_size):
+    def __init__(self):
         super().__init__()
         # @NOTE this is not really an embedding, it is a mapping of every token
         # to logits of the next predicted token
@@ -104,7 +116,7 @@ class BigramLanguageModel(nn.Module):
         return batch_context_toks
 
 
-model = BigramLanguageModel(vocab_size)
+model = BigramLanguageModel()
 model = model.to(device)
 
 
@@ -112,9 +124,12 @@ model = model.to(device)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 
-loss = 0
+for iter in range(TRAINING_ITERS):
 
-for _ in range(TRAINING_ITERS):
+    if iter % EVAL_ITERS == 0:
+        losses = estimate_loss()
+        print(f"Step {iter:4d}: train loss: {losses['train']:.4f}, val loss: {losses['val']:.4f}")
+        
     # Set gradients to None
     # @NOTE `set_to_none=True` may decrease memory footprint
     optimizer.zero_grad(set_to_none=True)
@@ -128,8 +143,9 @@ for _ in range(TRAINING_ITERS):
     loss.backward()
 
     optimizer.step()
-print(f"Loss: {loss}")
 
+
+## Use our trained model to generate text
 
 context = torch.zeros((1, BLOCK_SIZE), dtype=torch.long, device=device)
 print(decode(model.generate(context, max_new_toks=500)[0].tolist()))
