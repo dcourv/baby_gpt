@@ -5,7 +5,7 @@ import torch.nn.functional as F
 BATCH_SIZE = 64
 BLOCK_SIZE = 8
 TRAIN_SPLIT = 0.8
-EMBEDDING_DIM = 128 # @NOTE unused as of yet
+EMBEDDING_DIM = 128
 TRAINING_ITERS = 400
 LEARNING_RATE = 1e-2
 EVAL_ITERS = 200
@@ -79,6 +79,36 @@ def estimate_loss():
     model.train()
     return out
 
+## Define a self-attention head
+
+class Head(nn.Module):
+
+    # @NOTE do we need to make head_size a hyperparameter? Do we need to pass it around?
+    def __init__(self, head_size):
+        super().__init__()
+        # @TODO determine whether we need to explicitly turn off bias
+        self.key = nn.Linear(EMBEDDING_DIM, head_size)
+        self.query = nn.Linear(EMBEDDING_DIM, head_size)
+        self.value = nn.Linear(EMBEDDING_DIM, head_size)
+    
+    def forward(self, x):
+        B, T, C = x.shape
+        k = self.key(x) # (B, T, H)
+        q = self.query(x) # (B, T, H)
+        v = self.value(x) # (B, T, H)
+
+        H = k.shape[-1] # = head_size
+
+        attn_preweights = q @ torch.transpose(k, -1, -2) * (H ** -0.5) # (B, T, T)
+
+        lower_tri = torch.tril(torch.ones(T, T))
+        causal_attn_preweights = attn_preweights.masked_fill(lower_tri == 0, float('-inf'))
+        causal_attn_weights = F.softmax(causal_attn_preweights, dim=-1) # (T)
+
+        out = causal_attn_weights @ v # (B, T, H)
+        return out
+
+
 ## Define and instantiate simple bigram model
 
 class BigramLanguageModel(nn.Module):
@@ -90,6 +120,8 @@ class BigramLanguageModel(nn.Module):
         self.tok_embedding_table = nn.Embedding(vocab_size, EMBEDDING_DIM)
         self.pos_embedding_table = nn.Embedding(BLOCK_SIZE, EMBEDDING_DIM)
 
+        # @NOTE using entire EMBEDDING_DIM for now, head size will be smaller
+        self.sa_head = Head(EMBEDDING_DIM)
         self.lm_head = nn.Linear(EMBEDDING_DIM, vocab_size)
 
     def forward(self, batch_toks, batch_tok_targets=None):
@@ -100,9 +132,9 @@ class BigramLanguageModel(nn.Module):
         pos_embeds = self.pos_embedding_table(torch.arange(T, device=device)) # (T, C)
 
         input_embeds = tok_embeds + pos_embeds # Broadcasted to (B, T, C)
-        # input_embeds = tok_embeds
+        head_out = self.sa_head(input_embeds) # (B, T, H=C)
 
-        logits = self.lm_head(input_embeds) # (B, T, V)
+        logits = self.lm_head(head_out) # (B, T, V)
 
         if batch_tok_targets is None:
             loss = None
@@ -110,8 +142,8 @@ class BigramLanguageModel(nn.Module):
 
         # prepare logits for use with F.cross_entropy
         # @TODO fix C -> V
-        B, T, C = logits.shape
-        logits = logits.view(B*T, C)
+        B, T, V = logits.shape
+        logits = logits.view(B*T, V)
         targets = batch_tok_targets.view(B*T)
         loss = F.cross_entropy(logits, targets)
 
