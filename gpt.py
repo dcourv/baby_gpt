@@ -6,7 +6,7 @@ BATCH_SIZE = 64
 BLOCK_SIZE = 8
 TRAIN_SPLIT = 0.8
 EMBEDDING_DIM = 128 # @NOTE unused as of yet
-TRAINING_ITERS = 3000
+TRAINING_ITERS = 400
 LEARNING_RATE = 1e-2
 EVAL_ITERS = 200
 
@@ -87,18 +87,29 @@ class BigramLanguageModel(nn.Module):
         super().__init__()
         # @NOTE this is not really an embedding, it is a mapping of every token
         # to logits of the next predicted token
-        self.embedding_table = nn.Embedding(vocab_size, EMBEDDING_DIM)
+        self.tok_embedding_table = nn.Embedding(vocab_size, EMBEDDING_DIM)
+        self.pos_embedding_table = nn.Embedding(BLOCK_SIZE, EMBEDDING_DIM)
+
         self.lm_head = nn.Linear(EMBEDDING_DIM, vocab_size)
 
     def forward(self, batch_toks, batch_tok_targets=None):
-        embeddings = self.embedding_table(batch_toks) # (B, T, C)
-        logits = self.lm_head(embeddings)
+
+        B, T = batch_toks.shape
+
+        tok_embeds = self.tok_embedding_table(batch_toks) # (B, T, C)
+        pos_embeds = self.pos_embedding_table(torch.arange(T, device=device)) # (T, C)
+
+        input_embeds = tok_embeds + pos_embeds # Broadcasted to (B, T, C)
+        # input_embeds = tok_embeds
+
+        logits = self.lm_head(input_embeds) # (B, T, V)
 
         if batch_tok_targets is None:
             loss = None
             return logits, loss
 
         # prepare logits for use with F.cross_entropy
+        # @TODO fix C -> V
         B, T, C = logits.shape
         logits = logits.view(B*T, C)
         targets = batch_tok_targets.view(B*T)
@@ -106,16 +117,24 @@ class BigramLanguageModel(nn.Module):
 
         return logits, loss
 
-    def generate(self, batch_context_toks, max_new_toks):
+    def generate(self, batch_gened_toks, max_new_toks):
         for _ in range(max_new_toks):
+            # Make sure to consider only maximum `BLOCK_SIZE` tokens--otherwise your tensors will
+            # be out of range! (Hard to debug on GPU >:()
+            batch_context_toks = batch_gened_toks[:, -BLOCK_SIZE:]
+
             logits, _ = self(batch_context_toks) # (B, T, C)
+
             # we only care about the last time step (will change when we look at larger context window)
             logits = logits[:, -1, :] # (B, 1, C)
+
             probs = F.softmax(logits, dim=-1) # (B, C)
+
             batch_next_toks = torch.multinomial(probs, num_samples=1)
+
             # add new tokens for prediction
-            batch_context_toks = torch.cat((batch_context_toks, batch_next_toks), dim=1) # (B, T+1)
-        return batch_context_toks
+            batch_gened_toks = torch.cat((batch_gened_toks, batch_next_toks), dim=1) # (B, T+1)
+        return batch_gened_toks
 
 
 model = BigramLanguageModel()
@@ -131,7 +150,7 @@ for iter in range(TRAINING_ITERS):
     if iter % EVAL_ITERS == 0:
         losses = estimate_loss()
         print(f"Step {iter:4d}: train loss: {losses['train']:.4f}, val loss: {losses['val']:.4f}")
-        
+
     # Set gradients to None
     # @NOTE `set_to_none=True` may decrease memory footprint
     optimizer.zero_grad(set_to_none=True)
@@ -149,5 +168,5 @@ for iter in range(TRAINING_ITERS):
 
 ## Use our trained model to generate text
 
-context = torch.zeros((1, BLOCK_SIZE), dtype=torch.long, device=device)
+context = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(model.generate(context, max_new_toks=500)[0].tolist()))
