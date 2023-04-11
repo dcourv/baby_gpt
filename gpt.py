@@ -9,8 +9,8 @@ N_HEADS = 2
 TRAIN_SPLIT = 0.8
 LEARNING_RATE = 1e-3
 TRAINING_ITERS = 5000
-# @TODO make separate `EVAL_ITERS` and `EVAL_INTERVAL`
-EVAL_ITERS = 500
+EVAL_INTERVAL = 500
+EVAL_ITERS = 200
 FFN_HIDDEN_LAYER_SIZE = 4 * EMBEDDING_DIM
 
 assert EMBEDDING_DIM % N_HEADS == 0, "The number of heads must evenly divide the model dimension"
@@ -207,7 +207,7 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 
 for iter in range(TRAINING_ITERS):
 
-    if iter % EVAL_ITERS == 0:
+    if iter % EVAL_INTERVAL == 0:
         losses = estimate_loss()
         print(f"Step {iter:4d}: train loss: {losses['train']:.4f}, val loss: {losses['val']:.4f}")
 
