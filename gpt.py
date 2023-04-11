@@ -2,13 +2,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 BLOCK_SIZE = 8
-TRAIN_SPLIT = 0.8
 EMBEDDING_DIM = 128
-TRAINING_ITERS = 400
-LEARNING_RATE = 1e-2
-EVAL_ITERS = 200
+N_HEADS = 2
+TRAIN_SPLIT = 0.8
+LEARNING_RATE = 1e-3
+TRAINING_ITERS = 5000
+EVAL_ITERS = 500
+
+assert EMBEDDING_DIM % N_HEADS == 0, "The number of heads must evenly divide the model dimension"
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -79,9 +82,9 @@ def estimate_loss():
     model.train()
     return out
 
-## Define a self-attention head
+## Define model
 
-class Head(nn.Module):
+class SelfAttentionHead(nn.Module):
 
     # @NOTE do we need to make head_size a hyperparameter? Do we need to pass it around?
     def __init__(self, head_size):
@@ -107,9 +110,16 @@ class Head(nn.Module):
 
         out = causal_attn_weights @ v # (B, T, H)
         return out
+    
 
+class MultiHeadAttention(nn.Module):
+    def __init__(self, n_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([ SelfAttentionHead(head_size) for _ in range(n_heads) ])
 
-## Define and instantiate simple bigram model
+    def forward(self, x):
+        return torch.concat([ head(x) for head in self.heads ], dim=-1)
+
 
 class BigramLanguageModel(nn.Module):
 
@@ -121,7 +131,7 @@ class BigramLanguageModel(nn.Module):
         self.pos_embedding_table = nn.Embedding(BLOCK_SIZE, EMBEDDING_DIM)
 
         # @NOTE using entire EMBEDDING_DIM for now, head size will be smaller
-        self.sa_head = Head(EMBEDDING_DIM)
+        self.mh_attn = MultiHeadAttention(N_HEADS, EMBEDDING_DIM // N_HEADS)
         self.lm_head = nn.Linear(EMBEDDING_DIM, vocab_size)
 
     def forward(self, batch_toks, batch_tok_targets=None):
@@ -132,7 +142,7 @@ class BigramLanguageModel(nn.Module):
         pos_embeds = self.pos_embedding_table(torch.arange(T, device=device)) # (T, C)
 
         input_embeds = tok_embeds + pos_embeds # Broadcasted to (B, T, C)
-        head_out = self.sa_head(input_embeds) # (B, T, H=C)
+        head_out = self.mh_attn(input_embeds) # (B, T, H=C)
 
         logits = self.lm_head(head_out) # (B, T, V)
 
@@ -169,11 +179,10 @@ class BigramLanguageModel(nn.Module):
         return batch_gened_toks
 
 
+## Instantiate and train model
+
 model = BigramLanguageModel()
 model = model.to(device)
-
-
-## Train the model
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 
