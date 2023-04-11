@@ -9,7 +9,9 @@ N_HEADS = 2
 TRAIN_SPLIT = 0.8
 LEARNING_RATE = 1e-3
 TRAINING_ITERS = 5000
+# @TODO make separate `EVAL_ITERS` and `EVAL_INTERVAL`
 EVAL_ITERS = 500
+FFN_HIDDEN_LAYER_SIZE = 4 * EMBEDDING_DIM
 
 assert EMBEDDING_DIM % N_HEADS == 0, "The number of heads must evenly divide the model dimension"
 
@@ -118,10 +120,27 @@ class MultiHeadAttention(nn.Module):
         self.heads = nn.ModuleList([ SelfAttentionHead(head_size) for _ in range(n_heads) ])
 
     def forward(self, x):
-        return torch.concat([ head(x) for head in self.heads ], dim=-1)
+        return torch.concat([ head(x) for head in self.heads ], dim=-1) # (B, T, C)
 
 
-class BigramLanguageModel(nn.Module):
+class TransformerLayer(nn.Module):
+    def __init__(self, n_heads, head_size):
+        super().__init__()
+        self.mha = MultiHeadAttention(n_heads, head_size)
+        # @NOTE in the original paper, these have bias (as they do now)
+        self.l1 = nn.Linear(EMBEDDING_DIM, FFN_HIDDEN_LAYER_SIZE)
+        self.l2 = nn.Linear(FFN_HIDDEN_LAYER_SIZE, EMBEDDING_DIM)
+    
+    def forward(self, x):
+        # @NOTE may be cleaner to refactor this into a FFN module
+        mha_out = self.mha(x)
+        l1_out = self.l1(mha_out)
+        l2_in = F.relu(l1_out)
+        l2_out = self.l2(l1_out)
+        return l2_out
+
+
+class BabyTransformer(nn.Module):
 
     def __init__(self):
         super().__init__()
@@ -131,7 +150,7 @@ class BigramLanguageModel(nn.Module):
         self.pos_embedding_table = nn.Embedding(BLOCK_SIZE, EMBEDDING_DIM)
 
         # @NOTE using entire EMBEDDING_DIM for now, head size will be smaller
-        self.mh_attn = MultiHeadAttention(N_HEADS, EMBEDDING_DIM // N_HEADS)
+        self.transformer_layer = TransformerLayer(N_HEADS, EMBEDDING_DIM // N_HEADS)
         self.lm_head = nn.Linear(EMBEDDING_DIM, vocab_size)
 
     def forward(self, batch_toks, batch_tok_targets=None):
@@ -142,9 +161,9 @@ class BigramLanguageModel(nn.Module):
         pos_embeds = self.pos_embedding_table(torch.arange(T, device=device)) # (T, C)
 
         input_embeds = tok_embeds + pos_embeds # Broadcasted to (B, T, C)
-        head_out = self.mh_attn(input_embeds) # (B, T, H=C)
+        layer_out = self.transformer_layer(input_embeds) # (B, T, C)
 
-        logits = self.lm_head(head_out) # (B, T, V)
+        logits = self.lm_head(layer_out) # (B, T, V)
 
         if batch_tok_targets is None:
             loss = None
@@ -181,7 +200,7 @@ class BigramLanguageModel(nn.Module):
 
 ## Instantiate and train model
 
-model = BigramLanguageModel()
+model = BabyTransformer()
 model = model.to(device)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
