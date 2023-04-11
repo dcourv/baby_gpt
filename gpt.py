@@ -132,12 +132,14 @@ class TransformerLayer(nn.Module):
         self.l2 = nn.Linear(FFN_HIDDEN_LAYER_SIZE, EMBEDDING_DIM)
     
     def forward(self, x):
-        # @NOTE may be cleaner to refactor this into a FFN module
         mha_out = self.mha(x)
+        resid_out1 = mha_out + x
+        # @TODO will be cleaner after refactor into FFN module
         l1_out = self.l1(mha_out)
         l2_in = F.relu(l1_out)
         l2_out = self.l2(l1_out)
-        return l2_out
+        resid_out2 = l2_out + resid_out1 # residual connection
+        return resid_out2
 
 
 class BabyTransformer(nn.Module):
