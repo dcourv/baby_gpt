@@ -121,25 +121,33 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, x):
         return torch.concat([ head(x) for head in self.heads ], dim=-1) # (B, T, C)
+    
+
+class FeedForward(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(EMBEDDING_DIM, FFN_HIDDEN_LAYER_SIZE),
+            nn.ReLU(),
+            nn.Linear(FFN_HIDDEN_LAYER_SIZE, EMBEDDING_DIM)
+        )
+    
+    def forward(self, x):
+        return self.net(x)
 
 
 class TransformerLayer(nn.Module):
     def __init__(self, n_heads, head_size):
         super().__init__()
+        self.ln1 = nn.LayerNorm(EMBEDDING_DIM)
         self.mha = MultiHeadAttention(n_heads, head_size)
-        # @NOTE in the original paper, these have bias (as they do now)
-        self.l1 = nn.Linear(EMBEDDING_DIM, FFN_HIDDEN_LAYER_SIZE)
-        self.l2 = nn.Linear(FFN_HIDDEN_LAYER_SIZE, EMBEDDING_DIM)
+        self.ln2 = nn.LayerNorm(EMBEDDING_DIM)
+        self.ffn = FeedForward()
     
     def forward(self, x):
-        mha_out = self.mha(x)
-        resid_out1 = mha_out + x
-        # @TODO will be cleaner after refactor into FFN module
-        l1_out = self.l1(mha_out)
-        l2_in = F.relu(l1_out)
-        l2_out = self.l2(l1_out)
-        resid_out2 = l2_out + resid_out1 # residual connection
-        return resid_out2
+        x = x + self.mha(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
 
 
 class BabyTransformer(nn.Module):
@@ -152,7 +160,12 @@ class BabyTransformer(nn.Module):
         self.pos_embedding_table = nn.Embedding(BLOCK_SIZE, EMBEDDING_DIM)
 
         # @NOTE using entire EMBEDDING_DIM for now, head size will be smaller
-        self.transformer_layer = TransformerLayer(N_HEADS, EMBEDDING_DIM // N_HEADS)
+        self.transformer_layers = nn.Sequential(
+            TransformerLayer(N_HEADS, EMBEDDING_DIM // N_HEADS),
+            TransformerLayer(N_HEADS, EMBEDDING_DIM // N_HEADS),
+            TransformerLayer(N_HEADS, EMBEDDING_DIM // N_HEADS)
+        )
+        self.layer_norm_final = nn.LayerNorm(EMBEDDING_DIM)
         self.lm_head = nn.Linear(EMBEDDING_DIM, vocab_size)
 
     def forward(self, batch_toks, batch_tok_targets=None):
@@ -162,10 +175,11 @@ class BabyTransformer(nn.Module):
         tok_embeds = self.tok_embedding_table(batch_toks) # (B, T, C)
         pos_embeds = self.pos_embedding_table(torch.arange(T, device=device)) # (T, C)
 
-        input_embeds = tok_embeds + pos_embeds # Broadcasted to (B, T, C)
-        layer_out = self.transformer_layer(input_embeds) # (B, T, C)
-
-        logits = self.lm_head(layer_out) # (B, T, V)
+        x = tok_embeds + pos_embeds # Broadcasted to (B, T, C)
+        # @TODO would `blocks` be a better name than layers?
+        x = self.transformer_layers(x) # (B, T, C)
+        x = self.layer_norm_final(x)
+        logits = self.lm_head(x) # (B, T, V)
 
         if batch_tok_targets is None:
             loss = None
