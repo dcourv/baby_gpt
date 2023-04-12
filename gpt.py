@@ -2,16 +2,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-BATCH_SIZE = 32
-BLOCK_SIZE = 8
-EMBEDDING_DIM = 128
-N_HEADS = 2
-TRAIN_SPLIT = 0.8
-LEARNING_RATE = 1e-3
+# model hyperparams
+BATCH_SIZE = 64
+BLOCK_SIZE = 256
+EMBEDDING_DIM = 384
+N_HEADS = 6
+FFN_HIDDEN_LAYER_SIZE = 4 * EMBEDDING_DIM
+DROPOUT = 0.2
+N_LAYERS = 6
+
+# training hyperparams
+TRAIN_SPLIT = 0.9
+LEARNING_RATE = 3e-4
 TRAINING_ITERS = 5000
 EVAL_INTERVAL = 500
 EVAL_ITERS = 200
-FFN_HIDDEN_LAYER_SIZE = 4 * EMBEDDING_DIM
+
+
+# @TODO delete
+torch.manual_seed(1337)
 
 assert EMBEDDING_DIM % N_HEADS == 0, "The number of heads must evenly divide the model dimension"
 
@@ -88,14 +97,14 @@ def estimate_loss():
 
 class SelfAttentionHead(nn.Module):
 
-    # @NOTE do we need to make head_size a hyperparameter? Do we need to pass it around?
     def __init__(self, head_size):
         super().__init__()
-        # @TODO determine whether we need to explicitly turn off bias
-        self.key = nn.Linear(EMBEDDING_DIM, head_size)
-        self.query = nn.Linear(EMBEDDING_DIM, head_size)
-        self.value = nn.Linear(EMBEDDING_DIM, head_size)
-    
+        self.key = nn.Linear(EMBEDDING_DIM, head_size, bias=False)
+        self.query = nn.Linear(EMBEDDING_DIM, head_size, bias=False)
+        self.value = nn.Linear(EMBEDDING_DIM, head_size, bias=False)
+        self.register_buffer('lower_tri', torch.tril(torch.ones(BLOCK_SIZE, BLOCK_SIZE)))
+        self.dropout = nn.Dropout(DROPOUT)
+
     def forward(self, x):
         B, T, C = x.shape
         k = self.key(x) # (B, T, H)
@@ -106,22 +115,29 @@ class SelfAttentionHead(nn.Module):
 
         attn_preweights = q @ torch.transpose(k, -1, -2) * (H ** -0.5) # (B, T, T)
 
-        lower_tri = torch.tril(torch.ones(T, T, device=device))
-        causal_attn_preweights = attn_preweights.masked_fill(lower_tri == 0, float('-inf'))
-        causal_attn_weights = F.softmax(causal_attn_preweights, dim=-1) # (T)
+        # @NOTE we use [:T, :T] for when T < BLOCK_SIZE when generating beginnings of seqs
+        causal_attn_preweights = attn_preweights.masked_fill(self.lower_tri[:T, :T] == 0, float('-inf'))
+        causal_attn_weights = F.softmax(causal_attn_preweights, dim=-1) # (B, T, T)
 
-        out = causal_attn_weights @ v # (B, T, H)
+        out = self.dropout(causal_attn_weights)
+        out = out @ v # (B, T, H)
         return out
-    
+
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, n_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([ SelfAttentionHead(head_size) for _ in range(n_heads) ])
+        # @NOTE n_heads * head_size = EMEDDING_DIM
+        self.linear = nn.Linear(n_heads * head_size, EMBEDDING_DIM)
+        self.dropout = nn.Dropout(DROPOUT)
 
     def forward(self, x):
-        return torch.concat([ head(x) for head in self.heads ], dim=-1) # (B, T, C)
-    
+        x = torch.concat([ head(x) for head in self.heads ], dim=-1) # (B, T, C)
+        x = self.linear(x)
+        x = self.dropout(x)
+        return x
+
 
 class FeedForward(nn.Module):
     def __init__(self):
@@ -129,9 +145,10 @@ class FeedForward(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(EMBEDDING_DIM, FFN_HIDDEN_LAYER_SIZE),
             nn.ReLU(),
-            nn.Linear(FFN_HIDDEN_LAYER_SIZE, EMBEDDING_DIM)
+            nn.Linear(FFN_HIDDEN_LAYER_SIZE, EMBEDDING_DIM),
+            nn.Dropout(DROPOUT)
         )
-    
+
     def forward(self, x):
         return self.net(x)
 
@@ -143,7 +160,7 @@ class TransformerLayer(nn.Module):
         self.mha = MultiHeadAttention(n_heads, head_size)
         self.ln2 = nn.LayerNorm(EMBEDDING_DIM)
         self.ffn = FeedForward()
-    
+
     def forward(self, x):
         x = x + self.mha(self.ln1(x))
         x = x + self.ffn(self.ln2(x))
@@ -160,10 +177,9 @@ class BabyTransformer(nn.Module):
         self.pos_embedding_table = nn.Embedding(BLOCK_SIZE, EMBEDDING_DIM)
 
         # @NOTE using entire EMBEDDING_DIM for now, head size will be smaller
+        head_size = EMBEDDING_DIM // N_HEADS
         self.transformer_layers = nn.Sequential(
-            TransformerLayer(N_HEADS, EMBEDDING_DIM // N_HEADS),
-            TransformerLayer(N_HEADS, EMBEDDING_DIM // N_HEADS),
-            TransformerLayer(N_HEADS, EMBEDDING_DIM // N_HEADS)
+            *[ TransformerLayer(N_HEADS, head_size) for _ in range(N_LAYERS) ]
         )
         self.layer_norm_final = nn.LayerNorm(EMBEDDING_DIM)
         self.lm_head = nn.Linear(EMBEDDING_DIM, vocab_size)
@@ -218,14 +234,25 @@ class BabyTransformer(nn.Module):
 
 model = BabyTransformer()
 model = model.to(device)
+params = sum(p.numel() for p in model.parameters())
+print(f"Number of parameters: {params/1e6}M")
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 
 for iter in range(TRAINING_ITERS):
 
-    if iter % EVAL_INTERVAL == 0:
+    if iter % 10 == 0:
+        print("Step:", iter)
+
+    if iter % EVAL_INTERVAL == 0 or iter == TRAINING_ITERS - 1:
         losses = estimate_loss()
-        print(f"Step {iter:4d}: train loss: {losses['train']:.4f}, val loss: {losses['val']:.4f}")
+        step_summary = f"Step {iter:4d}: train loss: {losses['train']:.4f}, val loss: {losses['val']:.4f}"
+        print(step_summary)
+
+        # context = torch.zeros((1, 1), dtype=torch.long, device=device)
+        # with open(f"output_{iter}.txt", 'w') as f:
+        #     f.write(step_summary + '\n')
+        #     f.write(decode(model.generate(context, max_new_toks=1000)[0].tolist()))
 
     # Set gradients to None
     # @NOTE `set_to_none=True` may decrease memory footprint
