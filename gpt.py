@@ -106,7 +106,7 @@ class SelfAttentionHead(nn.Module):
 
         attn_preweights = q @ torch.transpose(k, -1, -2) * (H ** -0.5) # (B, T, T)
 
-        lower_tri = torch.tril(torch.ones(T, T))
+        lower_tri = torch.tril(torch.ones(T, T, device=device))
         causal_attn_preweights = attn_preweights.masked_fill(lower_tri == 0, float('-inf'))
         causal_attn_weights = F.softmax(causal_attn_preweights, dim=-1) # (T)
 
