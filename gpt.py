@@ -5,7 +5,7 @@ import torch.nn.functional as F
 # model hyperparams
 BATCH_SIZE = 64
 BLOCK_SIZE = 256
-EMBEDDING_DIM = 384
+EMBEDDING_DIM = 384 # aka d_model
 N_HEADS = 6
 FFN_HIDDEN_LAYER_SIZE = 4 * EMBEDDING_DIM
 DROPOUT = 0.2
@@ -18,22 +18,23 @@ TRAINING_ITERS = 5000
 EVAL_INTERVAL = 500
 EVAL_ITERS = 200
 
-
-# @TODO delete
-torch.manual_seed(1337)
-
 assert EMBEDDING_DIM % N_HEADS == 0, "The number of heads must evenly divide the model dimension"
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+torch.manual_seed(1337)
+
+## Input data goes in "input.txt"
+# For Shakespeare:
 # wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
 ## Open input data file
 with open('input.txt', 'r') as file:
     input_text = file.read()
 
+
 ## Tokenize input text (character-level tokenization)
-# @TODO use BPE? (tiktoken?)
+# @TODO use more sophisticated tokenizer (tiktoken?)
 
 chars = sorted(list(set(input_text)))
 vocab_size = len(chars)
@@ -48,15 +49,15 @@ decode = lambda tokens: ''.join([ itoc[t] for t in tokens ])
 
 input_toks = encode(input_text)
 
-# @TODO data will contain high-dim embeddings instead of tokens?
-
 data = torch.tensor(input_toks)
+
 
 ## Train/Val split
 
 train_split_idx = int(TRAIN_SPLIT * len(data))
 train_data = data[:train_split_idx]
 val_data = data[train_split_idx:]
+
 
 ## Generate training examples
 
@@ -93,6 +94,7 @@ def estimate_loss():
     model.train()
     return out
 
+
 ## Define model
 
 class SelfAttentionHead(nn.Module):
@@ -116,6 +118,7 @@ class SelfAttentionHead(nn.Module):
         attn_preweights = q @ torch.transpose(k, -1, -2) * (H ** -0.5) # (B, T, T)
 
         # @NOTE we use [:T, :T] for when T < BLOCK_SIZE when generating beginnings of seqs
+        # otherwise lower_tri is already shape (T, T)
         causal_attn_preweights = attn_preweights.masked_fill(self.lower_tri[:T, :T] == 0, float('-inf'))
         causal_attn_weights = F.softmax(causal_attn_preweights, dim=-1) # (B, T, T)
 
@@ -171,8 +174,7 @@ class BabyTransformer(nn.Module):
 
     def __init__(self):
         super().__init__()
-        # @NOTE this is not really an embedding, it is a mapping of every token
-        # to logits of the next predicted token
+
         self.tok_embedding_table = nn.Embedding(vocab_size, EMBEDDING_DIM)
         self.pos_embedding_table = nn.Embedding(BLOCK_SIZE, EMBEDDING_DIM)
 
@@ -192,7 +194,6 @@ class BabyTransformer(nn.Module):
         pos_embeds = self.pos_embedding_table(torch.arange(T, device=device)) # (T, C)
 
         x = tok_embeds + pos_embeds # Broadcasted to (B, T, C)
-        # @TODO would `blocks` be a better name than layers?
         x = self.transformer_layers(x) # (B, T, C)
         x = self.layer_norm_final(x)
         logits = self.lm_head(x) # (B, T, V)
@@ -202,7 +203,6 @@ class BabyTransformer(nn.Module):
             return logits, loss
 
         # prepare logits for use with F.cross_entropy
-        # @TODO fix C -> V
         B, T, V = logits.shape
         logits = logits.view(B*T, V)
         targets = batch_tok_targets.view(B*T)
@@ -210,13 +210,16 @@ class BabyTransformer(nn.Module):
 
         return logits, loss
 
-    def generate(self, batch_gened_toks, max_new_toks):
+    def generate(self, gened_toks, max_new_toks):
         for _ in range(max_new_toks):
+            # @NOTE both `gened_toks` and `context_toks` may be batched, though
+            # we do not currently use this functionality
+
             # Make sure to consider only maximum `BLOCK_SIZE` tokens--otherwise your tensors will
             # be out of range! (Hard to debug on GPU >:()
-            batch_context_toks = batch_gened_toks[:, -BLOCK_SIZE:]
+            context_toks = gened_toks[:, -BLOCK_SIZE:]
 
-            logits, _ = self(batch_context_toks) # (B, T, C)
+            logits, _ = self(context_toks) # (B, T, C)
 
             # we only care about the last time step (will change when we look at larger context window)
             logits = logits[:, -1, :] # (B, 1, C)
@@ -226,8 +229,8 @@ class BabyTransformer(nn.Module):
             batch_next_toks = torch.multinomial(probs, num_samples=1)
 
             # add new tokens for prediction
-            batch_gened_toks = torch.cat((batch_gened_toks, batch_next_toks), dim=1) # (B, T+1)
-        return batch_gened_toks
+            gened_toks = torch.cat((gened_toks, batch_next_toks), dim=1) # (B, T+1)
+        return gened_toks
 
 
 ## Instantiate and train model
@@ -240,9 +243,6 @@ print(f"Number of parameters: {params/1e6}M")
 optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 
 for iter in range(TRAINING_ITERS):
-
-    if iter % 10 == 0:
-        print("Step:", iter)
 
     if iter % EVAL_INTERVAL == 0 or iter == TRAINING_ITERS - 1:
         losses = estimate_loss()
@@ -273,3 +273,4 @@ for iter in range(TRAINING_ITERS):
 
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(model.generate(context, max_new_toks=500)[0].tolist()))
+# open('output.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
