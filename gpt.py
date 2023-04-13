@@ -22,7 +22,7 @@ assert EMBEDDING_DIM % N_HEADS == 0, "The number of heads must evenly divide the
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-torch.manual_seed(1337)
+torch.manual_seed(0)
 
 ## Input data goes in "input.txt"
 # For Shakespeare:
@@ -249,6 +249,8 @@ for iter in range(TRAINING_ITERS):
         step_summary = f"Step {iter:4d}: train loss: {losses['train']:.4f}, val loss: {losses['val']:.4f}"
         print(step_summary)
 
+        # @NOTE uncomment to see training progress by generating text to a file
+        # at each evaluation step
         # context = torch.zeros((1, 1), dtype=torch.long, device=device)
         # with open(f"output_{iter}.txt", 'w') as f:
         #     f.write(step_summary + '\n')
